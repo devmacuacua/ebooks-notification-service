@@ -1,0 +1,52 @@
+// Prisma schema for notification_db
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum NotificationType {
+  SUBSCRIPTION_EXPIRING
+  SUBSCRIPTION_EXPIRED
+  ORDER_STATUS_CHANGED
+  DELIVERY_UPDATE
+  NEW_BOOK
+  PAYMENT_CONFIRMED
+  PAYMENT_FAILED
+}
+
+enum EmailStatus {
+  SENT
+  FAILED
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  isRead    Boolean          @default(false)
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  @@index([userId])
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model EmailLog {
+  id        String      @id @default(uuid())
+  to        String
+  subject   String
+  template  String
+  status    EmailStatus
+  sentAt    DateTime    @default(now())
+  error     String?
+
+  @@map("email_logs")
+}
