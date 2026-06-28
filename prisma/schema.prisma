@@ -1,17 +1,16 @@
 // Prisma schema for notification_db
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 enum NotificationType {
   SUBSCRIPTION_EXPIRING
   SUBSCRIPTION_EXPIRED
+  SUBSCRIPTION_ACTIVATED
   ORDER_STATUS_CHANGED
   DELIVERY_UPDATE
   NEW_BOOK

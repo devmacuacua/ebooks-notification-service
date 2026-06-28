@@ -23,7 +23,6 @@ interface UserRegisteredPayload {
 }
 
 interface PasswordResetPayload {
-  userId: string;
   email: string;
   name: string;
   resetUrl: string;
@@ -31,80 +30,99 @@ interface PasswordResetPayload {
 
 interface SubscriptionExpiringPayload {
   userId: string;
-  email: string;
-  name: string;
-  daysLeft: number;
-  renewUrl: string;
   subscriptionId: string;
+  daysLeft: number;
+  endDate?: string;
+  planType?: string;
+}
+
+interface SubscriptionActivatedPayload {
+  userId: string;
+  subscriptionId: string;
+  planId: string;
+  planName: string;
+  expiresAt: string;
 }
 
 interface OrderStatusChangedPayload {
+  orderId: string;
+  orderNumber?: string;
   userId: string;
-  email: string;
-  name: string;
-  order: {
-    id: string;
-    status: string;
-    items: Array<{ title: string; author: string; price: number }>;
-    total: number;
-    createdAt?: string;
-  };
+  previousStatus?: string;
+  newStatus: string;
 }
 
 interface DeliveryUpdatedPayload {
+  deliveryId?: string;
+  orderId: string;
   userId: string;
-  email: string;
-  name: string;
-  phone?: string;
-  delivery: {
-    orderId: string;
-    trackingCode?: string;
-    status: string;
-    estimatedDelivery?: string;
-    trackingUrl?: string;
-    notes?: string;
-  };
+  trackingCode?: string;
+  status: string;
+  province?: string;
+  recipientName?: string;
+  recipientPhone?: string;
+  estimatedDelivery?: string;
+  deliveredAt?: string;
 }
 
 interface PaymentConfirmedPayload {
+  paymentId: string;
   userId: string;
-  email: string;
-  name: string;
-  payment: {
-    id: string;
-    amount: number;
-    currency?: string;
-    method?: string;
-    orderId?: string;
-    date?: string;
-  };
+  amount: number;
+  currency?: string;
+  method?: string;
+  orderId?: string;
+  subscriptionId?: string;
 }
 
-const EXCHANGE = 'ebooks';
+interface UserInfo {
+  id: string;
+  name: string;
+  email: string;
+}
+
+const EXCHANGE = 'ebooks.events';
 const EXCHANGE_TYPE = 'topic';
 
 const QUEUES = {
-  USER_REGISTERED: 'notification.user.registered',
-  PASSWORD_RESET: 'notification.user.password-reset-requested',
-  SUBSCRIPTION_EXPIRING: 'notification.subscription.expiring',
-  ORDER_STATUS_CHANGED: 'notification.order.status-changed',
-  DELIVERY_UPDATED: 'notification.delivery.updated',
-  PAYMENT_CONFIRMED: 'notification.payment.confirmed',
+  USER_REGISTERED:          'notification.user.registered',
+  PASSWORD_RESET:           'notification.user.password-reset-requested',
+  SUBSCRIPTION_EXPIRING:    'notification.subscription.expiring',
+  SUBSCRIPTION_ACTIVATED:   'notification.subscription.activated',
+  ORDER_STATUS_CHANGED:     'notification.order.status-changed',
+  DELIVERY_UPDATED:         'notification.delivery.updated',
+  PAYMENT_CONFIRMED:        'notification.payment.confirmed',
 } as const;
+
+const ROUTING_KEYS: Record<keyof typeof QUEUES, string> = {
+  USER_REGISTERED:        'user.registered',
+  PASSWORD_RESET:         'user.password-reset-requested',
+  SUBSCRIPTION_EXPIRING:  'subscription.expiring',
+  SUBSCRIPTION_ACTIVATED: 'subscription.activated',
+  ORDER_STATUS_CHANGED:   'order.status-changed',
+  DELIVERY_UPDATED:       'delivery.status.updated',
+  PAYMENT_CONFIRMED:      'payment.completed',
+};
 
 @Injectable()
 export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMQConsumerService.name);
-  private connection: amqplib.Connection | null = null;
+  private connection: amqplib.ChannelModel | null = null;
   private channel: amqplib.Channel | null = null;
   private isShuttingDown = false;
+  private readonly authServiceUrl: string;
 
   constructor(
     private readonly config: ConfigService,
     private readonly emailService: EmailService,
     private readonly notificationService: NotificationService,
     private readonly smsService: SmsService,
-  ) {}
+  ) {
+    this.authServiceUrl = this.config.get<string>(
+      'AUTH_SERVICE_URL',
+      'http://ebooks-auth-service:8081',
+    );
+  }
 
   async onModuleInit() {
     await this.connect();
@@ -113,6 +131,17 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.isShuttingDown = true;
     await this.disconnect();
+  }
+
+  private async fetchUserInfo(userId: string): Promise<UserInfo | null> {
+    try {
+      const res = await fetch(`${this.authServiceUrl}/auth/internal/users/${userId}`);
+      if (!res.ok) return null;
+      return (await res.json()) as UserInfo;
+    } catch {
+      this.logger.warn(`Could not fetch user info for userId=${userId}`);
+      return null;
+    }
   }
 
   private async connect(): Promise<void> {
@@ -152,9 +181,12 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
 
     const ch = this.channel;
 
+    for (const key of Object.keys(QUEUES) as Array<keyof typeof QUEUES>) {
+      await ch.assertQueue(QUEUES[key], { durable: true });
+      await ch.bindQueue(QUEUES[key], EXCHANGE, ROUTING_KEYS[key]);
+    }
+
     // User registered
-    await ch.assertQueue(QUEUES.USER_REGISTERED, { durable: true });
-    await ch.bindQueue(QUEUES.USER_REGISTERED, EXCHANGE, QUEUES.USER_REGISTERED);
     await ch.consume(QUEUES.USER_REGISTERED, (msg) =>
       this.handleMessage(msg, (payload: UserRegisteredPayload) =>
         this.handleUserRegistered(payload),
@@ -162,8 +194,6 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
     );
 
     // Password reset
-    await ch.assertQueue(QUEUES.PASSWORD_RESET, { durable: true });
-    await ch.bindQueue(QUEUES.PASSWORD_RESET, EXCHANGE, QUEUES.PASSWORD_RESET);
     await ch.consume(QUEUES.PASSWORD_RESET, (msg) =>
       this.handleMessage(msg, (payload: PasswordResetPayload) =>
         this.handlePasswordReset(payload),
@@ -171,17 +201,20 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
     );
 
     // Subscription expiring
-    await ch.assertQueue(QUEUES.SUBSCRIPTION_EXPIRING, { durable: true });
-    await ch.bindQueue(QUEUES.SUBSCRIPTION_EXPIRING, EXCHANGE, QUEUES.SUBSCRIPTION_EXPIRING);
     await ch.consume(QUEUES.SUBSCRIPTION_EXPIRING, (msg) =>
       this.handleMessage(msg, (payload: SubscriptionExpiringPayload) =>
         this.handleSubscriptionExpiring(payload),
       ),
     );
 
+    // Subscription activated
+    await ch.consume(QUEUES.SUBSCRIPTION_ACTIVATED, (msg) =>
+      this.handleMessage(msg, (payload: SubscriptionActivatedPayload) =>
+        this.handleSubscriptionActivated(payload),
+      ),
+    );
+
     // Order status changed
-    await ch.assertQueue(QUEUES.ORDER_STATUS_CHANGED, { durable: true });
-    await ch.bindQueue(QUEUES.ORDER_STATUS_CHANGED, EXCHANGE, QUEUES.ORDER_STATUS_CHANGED);
     await ch.consume(QUEUES.ORDER_STATUS_CHANGED, (msg) =>
       this.handleMessage(msg, (payload: OrderStatusChangedPayload) =>
         this.handleOrderStatusChanged(payload),
@@ -189,8 +222,6 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
     );
 
     // Delivery updated
-    await ch.assertQueue(QUEUES.DELIVERY_UPDATED, { durable: true });
-    await ch.bindQueue(QUEUES.DELIVERY_UPDATED, EXCHANGE, QUEUES.DELIVERY_UPDATED);
     await ch.consume(QUEUES.DELIVERY_UPDATED, (msg) =>
       this.handleMessage(msg, (payload: DeliveryUpdatedPayload) =>
         this.handleDeliveryUpdated(payload),
@@ -198,8 +229,6 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
     );
 
     // Payment confirmed
-    await ch.assertQueue(QUEUES.PAYMENT_CONFIRMED, { durable: true });
-    await ch.bindQueue(QUEUES.PAYMENT_CONFIRMED, EXCHANGE, QUEUES.PAYMENT_CONFIRMED);
     await ch.consume(QUEUES.PAYMENT_CONFIRMED, (msg) =>
       this.handleMessage(msg, (payload: PaymentConfirmedPayload) =>
         this.handlePaymentConfirmed(payload),
@@ -224,7 +253,6 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
         ch.ack(msg);
       } catch (err: any) {
         this.logger.error(`Error processing message: ${err.message}`);
-        // Nack without requeue to avoid infinite loop; dead-letter queue can handle it
         ch.nack(msg, false, false);
       }
     })();
@@ -250,13 +278,8 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
 
   private async handleSubscriptionExpiring(payload: SubscriptionExpiringPayload): Promise<void> {
     this.logger.log(`Handling subscription.expiring for user ${payload.userId}`);
-    await Promise.all([
-      this.emailService.sendSubscriptionExpiringEmail(
-        payload.email,
-        payload.name,
-        payload.daysLeft,
-        payload.renewUrl,
-      ),
+
+    const tasks: Promise<any>[] = [
       this.notificationService.create({
         userId: payload.userId,
         type: NotificationType.SUBSCRIPTION_EXPIRING,
@@ -264,84 +287,148 @@ export class RabbitMQConsumerService implements OnModuleInit, OnModuleDestroy {
         body: `Your subscription expires in ${payload.daysLeft} day${payload.daysLeft !== 1 ? 's' : ''}. Renew to keep access.`,
         metadata: { subscriptionId: payload.subscriptionId, daysLeft: payload.daysLeft },
       }),
-    ]);
+    ];
+
+    const user = await this.fetchUserInfo(payload.userId);
+    if (user) {
+      const frontendUrl = this.config.get<string>('FRONTEND_URL', 'https://ebooks.co.mz');
+      const renewUrl = `${frontendUrl}/subscription/renew`;
+      tasks.push(
+        this.emailService.sendSubscriptionExpiringEmail(
+          user.email,
+          user.name,
+          payload.daysLeft,
+          renewUrl,
+        ),
+      );
+    }
+
+    await Promise.all(tasks);
+  }
+
+  private async handleSubscriptionActivated(payload: SubscriptionActivatedPayload): Promise<void> {
+    this.logger.log(`Handling subscription.activated for user ${payload.userId}`);
+    const user = await this.fetchUserInfo(payload.userId);
+
+    const tasks: Promise<any>[] = [
+      this.notificationService.create({
+        userId: payload.userId,
+        type: NotificationType.SUBSCRIPTION_ACTIVATED,
+        title: 'Subscription Active',
+        body: `Your ${payload.planName} plan is now active. Enjoy unlimited reading!`,
+        metadata: {
+          subscriptionId: payload.subscriptionId,
+          planId: payload.planId,
+          planName: payload.planName,
+          expiresAt: payload.expiresAt,
+        },
+      }),
+    ];
+
+    if (user) {
+      tasks.push(
+        this.emailService.sendSubscriptionActivatedEmail(
+          user.email,
+          user.name,
+          payload.planName,
+          payload.expiresAt,
+        ),
+      );
+    }
+
+    await Promise.all(tasks);
   }
 
   private async handleOrderStatusChanged(payload: OrderStatusChangedPayload): Promise<void> {
     this.logger.log(`Handling order.status-changed for user ${payload.userId}`);
-    await Promise.all([
-      this.emailService.sendOrderConfirmationEmail(
-        payload.email,
-        payload.name,
-        payload.order,
-      ),
-      this.notificationService.create({
-        userId: payload.userId,
-        type: NotificationType.ORDER_STATUS_CHANGED,
-        title: 'Order Status Updated',
-        body: `Your order #${payload.order.id.substring(0, 8).toUpperCase()} is now ${payload.order.status}.`,
-        metadata: { orderId: payload.order.id, status: payload.order.status },
-      }),
-    ]);
+
+    await this.notificationService.create({
+      userId: payload.userId,
+      type: NotificationType.ORDER_STATUS_CHANGED,
+      title: 'Order Status Updated',
+      body: `Your order${payload.orderNumber ? ` #${payload.orderNumber}` : ''} is now ${payload.newStatus}.`,
+      metadata: { orderId: payload.orderId, status: payload.newStatus },
+    });
+
+    const user = await this.fetchUserInfo(payload.userId);
+    if (user) {
+      await this.emailService.sendOrderConfirmationEmail(user.email, user.name, {
+        id: payload.orderId,
+        status: payload.newStatus,
+        items: [],
+        total: 0,
+      });
+    }
   }
 
   private async handleDeliveryUpdated(payload: DeliveryUpdatedPayload): Promise<void> {
-    this.logger.log(`Handling delivery.updated for user ${payload.userId}`);
+    this.logger.log(`Handling delivery.status.updated for user ${payload.userId}`);
 
     const statusPt: Record<string, string> = {
-      CREATED: 'criada',
-      PICKING: 'em recolha',
+      PENDING: 'pendente',
+      PROCESSING: 'em processamento',
+      PICKED_UP: 'recolhida',
       IN_TRANSIT: 'em trânsito',
       OUT_FOR_DELIVERY: 'em entrega',
       DELIVERED: 'entregue',
       FAILED: 'falhou',
       RETURNED: 'devolvida',
     };
-    const statusLabel = statusPt[payload.delivery.status] ?? payload.delivery.status;
-    const trackingRef = payload.delivery.trackingCode ?? payload.delivery.orderId.substring(0, 8).toUpperCase();
+    const statusLabel = statusPt[payload.status] ?? payload.status;
+    const trackingRef = payload.trackingCode ?? payload.orderId.substring(0, 8).toUpperCase();
 
     const tasks: Promise<any>[] = [
-      this.emailService.sendDeliveryUpdateEmail(
-        payload.email,
-        payload.name,
-        payload.delivery,
-      ),
       this.notificationService.create({
         userId: payload.userId,
         type: NotificationType.DELIVERY_UPDATE,
         title: 'Actualização de entrega',
         body: `A sua encomenda ${trackingRef} está ${statusLabel}.`,
-        metadata: payload.delivery,
+        metadata: payload,
       }),
     ];
 
-    if (payload.phone) {
+    const user = await this.fetchUserInfo(payload.userId);
+    if (user) {
+      tasks.push(
+        this.emailService.sendDeliveryUpdateEmail(user.email, user.name, {
+          orderId: payload.orderId,
+          status: payload.status,
+          estimatedDelivery: payload.estimatedDelivery,
+        }),
+      );
+    }
+
+    if (payload.recipientPhone) {
       const smsMessage =
         `EBooksStore: A sua encomenda ${trackingRef} está ${statusLabel}` +
-        (payload.delivery.notes ? ` — ${payload.delivery.notes}` : '') +
         `. Mais info: ebooks.co.mz`;
-      tasks.push(this.smsService.send(payload.phone, smsMessage));
+      tasks.push(this.smsService.send(payload.recipientPhone, smsMessage));
     }
 
     await Promise.all(tasks);
   }
 
   private async handlePaymentConfirmed(payload: PaymentConfirmedPayload): Promise<void> {
-    this.logger.log(`Handling payment.confirmed for user ${payload.userId}`);
-    await Promise.all([
-      this.emailService.sendPaymentConfirmedEmail(
-        payload.email,
-        payload.name,
-        payload.payment,
-      ),
-      this.notificationService.create({
-        userId: payload.userId,
-        type: NotificationType.PAYMENT_CONFIRMED,
-        title: 'Payment Confirmed',
-        body: `Your payment of $${payload.payment.amount.toFixed(2)} has been confirmed.`,
-        metadata: payload.payment,
-      }),
-    ]);
+    this.logger.log(`Handling payment.completed for user ${payload.userId}`);
+
+    await this.notificationService.create({
+      userId: payload.userId,
+      type: NotificationType.PAYMENT_CONFIRMED,
+      title: 'Payment Confirmed',
+      body: `Your payment of ${payload.amount.toFixed(2)} ${payload.currency ?? 'MZN'} has been confirmed.`,
+      metadata: payload,
+    });
+
+    const user = await this.fetchUserInfo(payload.userId);
+    if (user) {
+      await this.emailService.sendPaymentConfirmedEmail(user.email, user.name, {
+        id: payload.paymentId,
+        amount: payload.amount,
+        currency: payload.currency,
+        method: payload.method,
+        orderId: payload.orderId,
+      });
+    }
   }
 
   private async disconnect(): Promise<void> {

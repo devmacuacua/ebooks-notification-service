@@ -256,6 +256,32 @@ export class EmailService {
     await this.sendAndLog(to, subject, 'delivery-update', this.baseTemplate(subject, content));
   }
 
+  async sendSubscriptionActivatedEmail(
+    to: string,
+    name: string,
+    planName: string,
+    expiresAt: string,
+  ): Promise<void> {
+    const subject = 'Welcome to EBooksStore — Subscription Active!';
+    const expiry = new Date(expiresAt).toLocaleDateString('en-US', { dateStyle: 'long' });
+    const content = `
+      <h2>Your subscription is active 🎉</h2>
+      <p>Hi ${name},</p>
+      <p>Thank you for subscribing to EBooksStore. Your <strong>${planName}</strong> plan is now active and you have unlimited access to our entire ebook library.</p>
+      <div class="info-box">
+        <p><strong>Plan:</strong> ${planName}</p>
+        <p><strong>Access until:</strong> ${expiry}</p>
+        <p><strong>Status:</strong> <span class="badge badge-success">Active</span></p>
+      </div>
+      <p style="text-align:center; margin: 32px 0;">
+        <a href="${this.config.get('FRONTEND_URL')}/catalog" class="btn">Start Reading</a>
+      </p>
+      <hr class="divider" />
+      <p style="font-size:13px; color:#999;">Your subscription renews automatically. You can manage it anytime from your account settings.</p>
+    `;
+    await this.sendAndLog(to, subject, 'subscription-activated', this.baseTemplate(subject, content));
+  }
+
   async sendPaymentConfirmedEmail(
     to: string,
     name: string,
