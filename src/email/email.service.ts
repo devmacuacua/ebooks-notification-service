@@ -12,14 +12,21 @@ export class EmailService {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
   ) {
+    const smtpHost = this.config.get<string>('SMTP_HOST');
+    const smtpUser = this.config.get<string>('SMTP_USER');
+    const smtpPass = this.config.get<string>('SMTP_PASS');
+
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      this.logger.warn(
+        'SMTP credentials not fully configured (SMTP_HOST, SMTP_USER, SMTP_PASS). Emails will fail silently.',
+      );
+    }
+
     this.transporter = nodemailer.createTransport({
-      host: this.config.get<string>('SMTP_HOST'),
+      host: smtpHost,
       port: this.config.get<number>('SMTP_PORT', 587),
       secure: this.config.get<number>('SMTP_PORT', 587) === 465,
-      auth: {
-        user: this.config.get<string>('SMTP_USER'),
-        pass: this.config.get<string>('SMTP_PASS'),
-      },
+      auth: { user: smtpUser, pass: smtpPass },
     });
   }
 
