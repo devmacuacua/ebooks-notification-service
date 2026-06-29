@@ -1,16 +1,22 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateNotificationDto } from './dto/create-notification.dto';
+import { FcmService } from '../push/fcm.service';
+import { PushDeviceService } from '../push/push-device.service';
 
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly fcm: FcmService,
+    private readonly pushDevices: PushDeviceService,
+  ) {}
 
   async create(dto: CreateNotificationDto) {
     this.logger.log(`Creating notification for user ${dto.userId} - type: ${dto.type}`);
-    return this.prisma.notification.create({
+    const notification = await this.prisma.notification.create({
       data: {
         userId: dto.userId,
         type: dto.type,
@@ -19,6 +25,16 @@ export class NotificationService {
         metadata: dto.metadata ?? undefined,
       },
     });
+
+    const tokens = await this.pushDevices.getTokensForUser(dto.userId);
+    if (tokens.length > 0) {
+      await this.fcm.sendToTokens(tokens, dto.title, dto.body, {
+        type: dto.type,
+        notificationId: notification.id,
+      });
+    }
+
+    return notification;
   }
 
   async findByUser(userId: string) {

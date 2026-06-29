@@ -38,6 +38,18 @@ model Notification {
   @@map("notifications")
 }
 
+model PushDevice {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  platform  String   // ios | android | web
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("push_devices")
+}
+
 model EmailLog {
   id        String      @id @default(uuid())
   to        String
