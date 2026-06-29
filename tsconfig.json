@@ -23,5 +23,5 @@
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false
   },
-  "exclude": ["node_modules", "dist", "**/*.spec.ts", "**/*.e2e-spec.ts", "test"]
+  "exclude": ["node_modules", "dist", "prisma", "**/*.spec.ts", "**/*.e2e-spec.ts", "test"]
 }
